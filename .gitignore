@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+node_modules/
+supabase-config.js
+.DS_Store
+
+.agents/

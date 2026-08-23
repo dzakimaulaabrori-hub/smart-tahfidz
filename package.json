@@ -1,0 +1,20 @@
+{
+  "name": "tilmidz-bulk-account-creator",
+  "version": "1.0.0",
+  "description": "Script sekali-jalan untuk membuat akun massal Tilmidz (guru, wali kelas, orang tua) di Supabase dari file Excel",
+  "main": "create-accounts.js",
+  "scripts": {
+    "start": "node create-accounts.js",
+    "lint": "node validate-html.js",
+    "typecheck": "node validate-html.js",
+    "build": "node validate-html.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "dotenv": "^16.4.5",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "prisma": "^7.9.1"
+  }
+}
