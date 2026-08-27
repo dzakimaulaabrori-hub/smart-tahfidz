@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SMART TAHFIDZ — SD Al Irsyad</title>
+<link rel="icon" type="image/png" sizes="192x192" href="./assets/icon-192.png">
+<link rel="apple-touch-icon" href="./assets/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <script src="supabase-config.js"></script>
@@ -679,7 +681,7 @@ document.getElementById('sidebarOverlay').addEventListener('click', closeMobileS
 const ROLE_LABEL = { admin:'PANEL ADMIN', wali_kelas:'PANEL WALI KELAS', guru_quran:"PANEL GURU AL-QUR'AN", kepala_sekolah:'PANEL KEPALA SEKOLAH', orang_tua:'PANEL ORANG TUA' };
 
 const NAV = {
-  admin: [ ['ringkasan','Dashboard'], ['siswa','Data Siswa'], ['kelas','Data Kelas'], ['pengaturan-akun','Manajemen Akun'], ['pengaturan-guru','Pengaturan Guru'], ['indikator','Indikator Karakter'], ['relasi','Relasi Orang Tua'], ['presensi','Rekap Presensi'] ],
+  admin: [ ['ringkasan','Dashboard'], ['siswa','Data Siswa'], ['kelas','Data Kelas'], ['pengaturan-akun','Manajemen Akun'], ['pengaturan-guru','Pengaturan Guru'], ['indikator','Indikator Karakter'], ['relasi','Relasi Orang Tua'], ['import-orang-tua','Import Data Orang Tua'], ['presensi','Rekap Presensi'] ],
   wali_kelas: [ ['ringkasan','Dashboard'], ['karakter','Input Nilai Karakter'], ['absensi','Input Absensi'], ['riwayat','Riwayat'], ['quran','Progres Al-Qur\'an'] ],
   guru_quran: [ ['ringkasan','Dashboard'], ['tilawah','Input Tilawah'], ['tahsin','Input Tahsin'], ['tahfidz','Input Tahfidz'], ['approval','Approval Tilawah Ortu'], ['riwayat','Riwayat Setoran'] ],
   kepala_sekolah: [ ['ringkasan','Dashboard'], ['quran','Progres Al-Qur\'an'], ['capaian','Capaian Hafalan'], ['karakter','Karakter Siswa'] ],
@@ -1653,6 +1655,99 @@ window.adminDeleteRelasi = async (id) => {
   if (error){ toast('Gagal: '+error.message, true); return; }
   toast('Relasi dihapus'); PAGE_LOAD.admin.relasi();
 };
+
+// ================= IMPORT DATA ORANG TUA (Admin) =================
+let adminParentImportRows = [];
+const PARENT_IMPORT_HEADERS = ['email', 'nis_anak', 'hubungan'];
+
+PAGE_HTML.admin['import-orang-tua'] = () => `
+  <div class="pagehead"><div><h1>Import Data Orang Tua</h1><p>Impor relasi akun orang tua dengan siswa dari file Excel</p></div></div>
+  <div class="card">
+    <h3 style="font-size:15px; font-weight:600; margin-bottom:5px;">Siapkan file Excel</h3>
+    <p style="font-size:12.5px; color:var(--ink-soft); margin-bottom:14px;">Gunakan template agar nama header tepat. Akun orang tua dan siswa harus sudah ada; import ini hanya menambahkan relasi pada tabel <code>orang_tua_siswa</code>.</p>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+      <button class="btn" style="background:var(--ink-soft);" id="btnDownloadParentTemplate">Download Template</button>
+      <label class="btn" style="cursor:pointer;">Pilih File Excel<input type="file" id="inputParentImport" accept=".xlsx,.xls" style="display:none;"></label>
+      <span id="parentImportFileName" style="font-size:12.5px; color:var(--ink-soft);"></span>
+    </div>
+    <div id="parentImportPreview" style="margin-top:14px; font-size:12.5px; color:var(--ink-soft);">Belum ada file yang dipilih.</div>
+    <div id="parentImportFileError" style="margin-top:8px; color:var(--danger); font-size:12.5px;"></div>
+  </div>
+  <div class="card">
+    <h3 style="font-size:15px; font-weight:600; margin-bottom:5px;">Proses Import</h3>
+    <p style="font-size:12.5px; color:var(--ink-soft); margin-bottom:12px;">Baris duplicate tidak akan ditambahkan ulang. Akun Auth baru tidak dibuat otomatis.</p>
+    <button class="btn" id="btnProcessParentImport" disabled>Proses Import</button>
+    <div id="parentImportResult" style="margin-top:16px;"></div>
+  </div>`;
+
+function parentImportResultHtml(result) {
+  const errors = (result.errors || []).map(item => `<li>Baris ${htmlSafe(item.row)} — ${htmlSafe(item.nama_siswa)}: ${htmlSafe(item.reason)}</li>`).join('');
+  return `<div class="grid-4" style="margin-bottom:12px;">
+    <div><div class="stat-num">${result.read}</div><div class="stat-label">Baris dibaca</div></div>
+    <div><div class="stat-num" style="color:var(--good);">${result.success}</div><div class="stat-label">Berhasil</div></div>
+    <div><div class="stat-num neg">${result.failed}</div><div class="stat-label">Gagal</div></div>
+    <div><div class="stat-num" style="color:var(--accent-deep);">${result.skipped}</div><div class="stat-label">Dilewati / duplicate</div></div>
+  </div>${errors ? `<div style="border:1px solid var(--danger); background:var(--danger-soft); padding:12px; font-size:12.5px;"><strong>Daftar baris gagal</strong><ul style="margin:7px 0 0 18px;">${errors}</ul></div>` : '<div style="color:var(--good); font-size:12.5px;">Tidak ada baris gagal.</div>'}`;
+}
+
+PAGE_BIND.admin['import-orang-tua'] = () => {
+  const download = document.getElementById('btnDownloadParentTemplate');
+  const input = document.getElementById('inputParentImport');
+  const process = document.getElementById('btnProcessParentImport');
+  const preview = document.getElementById('parentImportPreview');
+  const fileError = document.getElementById('parentImportFileError');
+  download.addEventListener('click', () => {
+    const instruction = [
+      ['PETUNJUK IMPORT DATA ORANG TUA'],
+      ['Isi hanya sheet "Data Orang Tua". Hapus baris contoh sebelum mengisi data asli.'],
+      ['Semua kolom wajib diisi. email harus cocok dengan akun Auth ber-role orang_tua yang sudah ada.'],
+      ['nis_anak harus cocok dengan NIS pada tabel siswa. hubungan hanya: ayah, ibu, atau wali.'],
+      ['Import tidak membuat akun baru, tidak membuat siswa baru, dan tidak menghapus data yang sudah ada.'],
+    ];
+    const rows = [PARENT_IMPORT_HEADERS, ['contoh.orangtua@example.com', 'CONTOH-NIS-001', 'ibu'], ['wali.contoh@example.com', 'CONTOH-NIS-002', 'ayah']];
+    const wb = XLSX.utils.book_new();
+    const guide = XLSX.utils.aoa_to_sheet(instruction); guide['!cols'] = [{wch:110}];
+    const data = XLSX.utils.aoa_to_sheet(rows); data['!cols'] = [{wch:30},{wch:20},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, guide, 'Petunjuk'); XLSX.utils.book_append_sheet(wb, data, 'Data Orang Tua');
+    XLSX.writeFile(wb, 'template-orang-tua-tilmidz.xlsx');
+  });
+  input.addEventListener('change', async event => {
+    const file = event.target.files[0];
+    adminParentImportRows = []; process.disabled = true; fileError.textContent = ''; preview.textContent = 'Membaca file...';
+    if (!file) return;
+    document.getElementById('parentImportFileName').textContent = file.name;
+    try {
+      const wb = XLSX.read(await file.arrayBuffer(), { type:'array' });
+      const sheetName = wb.SheetNames.includes('Data Orang Tua') ? 'Data Orang Tua' : wb.SheetNames[0];
+      const ws = wb.Sheets[sheetName];
+      const matrix = XLSX.utils.sheet_to_json(ws, { header:1, defval:'' });
+      const headers = (matrix[0] || []).map(value => String(value));
+      if (PARENT_IMPORT_HEADERS.some((header, index) => headers[index] !== header) || headers.length !== PARENT_IMPORT_HEADERS.length) {
+        throw new Error(`Header wajib tepat: ${PARENT_IMPORT_HEADERS.join(', ')}.`);
+      }
+      adminParentImportRows = XLSX.utils.sheet_to_json(ws, { defval:'' }).filter(row => PARENT_IMPORT_HEADERS.some(header => String(row[header] ?? '').trim() !== ''));
+      preview.innerHTML = `<strong>${adminParentImportRows.length} baris siap diproses</strong> dari sheet "${htmlSafe(sheetName)}".`;
+      process.disabled = adminParentImportRows.length === 0;
+      if (!adminParentImportRows.length) fileError.textContent = 'Tidak ada baris data setelah header.';
+    } catch (error) { preview.textContent = 'File belum siap diproses.'; fileError.textContent = error.message || 'Format file tidak valid.'; }
+    input.value = '';
+  });
+  process.addEventListener('click', async () => {
+    if (!adminParentImportRows.length) return;
+    process.disabled = true; process.textContent = 'Memproses...';
+    try {
+      const { data: { session } } = await sb.auth.getSession();
+      const response = await fetch('/api/admin-parent-import', { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${session?.access_token || ''}`, 'apikey':SUPABASE_ANON_KEY }, body:JSON.stringify({ rows:adminParentImportRows }) });
+      const body = await response.json();
+      if (!response.ok || body.error) throw new Error(body.error || 'Import gagal diproses.');
+      document.getElementById('parentImportResult').innerHTML = parentImportResultHtml(body.result);
+      toast(`Import selesai: ${body.result.success} berhasil, ${body.result.failed} gagal` , body.result.failed > 0 && body.result.success === 0);
+      adminParentImportRows = [];
+    } catch (error) { document.getElementById('parentImportResult').innerHTML = `<span style="color:var(--danger);">${htmlSafe(error.message)}</span>`; toast('Import gagal diproses', true); }
+    process.disabled = adminParentImportRows.length === 0; process.textContent = 'Proses Import';
+  });
+};
+PAGE_LOAD.admin['import-orang-tua'] = async () => {};
 
 // ================= REKAP PRESENSI (Admin) =================
 PAGE_HTML.admin.presensi = () => `

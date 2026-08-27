@@ -1,8 +1,3 @@
-# Cloudflare Pages configuration. Deploy from the repository root in the
-# Pages dashboard; the Functions directory is discovered automatically.
 name = "smart-tahfidz"
 compatibility_date = "2026-08-23"
 pages_build_output_dir = "."
-
-[build]
-command = "npm run build"

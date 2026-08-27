@@ -6,3 +6,7 @@ supabase-config.js
 .DS_Store
 
 .agents/
+.wrangler/
+# Data Excel sensitif
+*.xlsx
+*.xls
