@@ -37,7 +37,10 @@ async function requireAdmin(event, adminClient) {
   if (userError || !user) throw Object.assign(new Error('Sesi tidak valid atau sudah berakhir.'), { statusCode: 401 });
   const { data: profile, error: profileError } = await adminClient
     .from('profiles').select('id, role').eq('id', user.id).maybeSingle();
-  if (profileError || !profile || profile.role !== 'admin') {
+  const { data: additionalRoles, error: additionalRoleError } = await adminClient
+    .from('user_additional_roles').select('role').eq('user_id', user.id);
+  const isAdmin = profile?.role === 'admin' || (additionalRoles || []).some(row => row.role === 'admin');
+  if (profileError || additionalRoleError || !profile || !isAdmin) {
     throw Object.assign(new Error('Hanya Admin yang dapat mengelola akun.'), { statusCode: 403 });
   }
   return user;
@@ -59,6 +62,31 @@ function validateAccount(input) {
     throw new Error('Penugasan kelas hanya tersedia untuk akun guru.');
   }
   return { nama, email, password, role, kelasId, isKepalaSekolah };
+}
+
+const VALID_ADDITIONAL_ROLES = ['admin', 'wali_kelas', 'guru_quran', 'kepala_sekolah', 'orang_tua'];
+async function setAdditionalRoles(input, sb) {
+  const userId = String(input.user_id || '').trim();
+  const { data: profile, error: profileError } = await sb.from('profiles').select('id, role').eq('id', userId).maybeSingle();
+  if (profileError || !profile) throw Object.assign(new Error('Profil akun tidak ditemukan.'), { statusCode: 404 });
+  const roles = [...new Set(Array.isArray(input.roles) ? input.roles.map(role => String(role).trim()) : [])];
+  if (roles.some(role => !VALID_ADDITIONAL_ROLES.includes(role)) || roles.includes(profile.role)) {
+    throw Object.assign(new Error('Role tambahan tidak valid atau sama dengan role utama.'), { statusCode: 400 });
+  }
+  const { data: existing, error: existingError } = await sb.from('user_additional_roles').select('role').eq('user_id', userId);
+  if (existingError) throw new Error(existingError.message);
+  const existingRoles = new Set((existing || []).map(row => row.role));
+  const remove = [...existingRoles].filter(role => !roles.includes(role));
+  const add = roles.filter(role => !existingRoles.has(role));
+  for (const role of remove) {
+    const { error } = await sb.from('user_additional_roles').delete().eq('user_id', userId).eq('role', role);
+    if (error) throw new Error(error.message);
+  }
+  if (add.length) {
+    const { error } = await sb.from('user_additional_roles').insert(add.map(role => ({ user_id: userId, role })));
+    if (error) throw new Error(error.message);
+  }
+  return { user_id: userId, additional_roles: roles };
 }
 
 async function createAccount(input, sb) {
@@ -105,18 +133,23 @@ async function createAccount(input, sb) {
 }
 
 async function listAccounts(sb) {
-  const [{ data: userPage, error: usersError }, { data: profiles, error: profilesError }, { data: classes, error: classesError }] = await Promise.all([
+  const [{ data: userPage, error: usersError }, { data: profiles, error: profilesError }, { data: additionalRoles, error: additionalRoleError }, { data: classes, error: classesError }] = await Promise.all([
     sb.auth.admin.listUsers({ page: 1, perPage: 1000 }),
     sb.from('profiles').select('id, nama, role, is_kepala_sekolah').order('nama'),
+    sb.from('user_additional_roles').select('user_id, role').order('role'),
     sb.from('kelas').select('id, nama_kelas, wali_kelas_id').order('nama_kelas'),
   ]);
-  if (usersError || profilesError || classesError) throw new Error((usersError || profilesError || classesError).message);
+  if (usersError || profilesError || additionalRoleError || classesError) throw new Error((usersError || profilesError || additionalRoleError || classesError).message);
   const classByTeacher = {};
   (classes || []).forEach(k => { if (k.wali_kelas_id) (classByTeacher[k.wali_kelas_id] ||= []).push(k.nama_kelas); });
   const profileById = Object.fromEntries((profiles || []).map(p => [p.id, p]));
+  const additionalByUser = {};
+  (additionalRoles || []).forEach(row => { (additionalByUser[row.user_id] ||= []).push(row.role); });
   return ((userPage && userPage.users) || []).map(u => ({
     id: u.id, email: u.email || '', status: u.banned_until ? 'Diblokir' : 'Aktif',
     ...(profileById[u.id] || { nama: '-', role: 'belum ada profil', is_kepala_sekolah: false }),
+    additional_roles: additionalByUser[u.id] || [],
+    roles: [profileById[u.id]?.role, ...(additionalByUser[u.id] || [])].filter(Boolean),
     wali_kelas: classByTeacher[u.id] || [],
   }));
 }
@@ -167,6 +200,7 @@ exports.handler = async (event) => {
     const input = JSON.parse(event.body || '{}');
     if (input.action === 'list') return json(200, { accounts: await listAccounts(sb) });
     if (input.action === 'create') return json(201, { account: await createAccount(input, sb) });
+    if (input.action === 'set_additional_roles') return json(200, { account: await setAdditionalRoles(input, sb) });
     if (input.action === 'delete_empty_class') return json(200, { result: await deleteEmptyClass(input.class_id, sb) });
     return json(400, { error: 'Action tidak dikenal.' });
   } catch (error) {

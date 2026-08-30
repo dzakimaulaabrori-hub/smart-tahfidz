@@ -66,8 +66,13 @@ async function requireAdmin(request, env) {
   }, env.SUPABASE_ANON_KEY).catch(() => {
     throw new HttpError(401, 'Sesi tidak valid atau sudah berakhir.');
   });
-  const profiles = await supabaseFetch(env, `/rest/v1/profiles?select=id,role&id=${filterValue(user.id)}&limit=1`);
-  if (!profiles?.[0] || profiles[0].role !== 'admin') {
+  const [profiles, additionalRoles] = await Promise.all([
+    supabaseFetch(env, `/rest/v1/profiles?select=id,role&id=${filterValue(user.id)}&limit=1`),
+    supabaseFetch(env, `/rest/v1/user_additional_roles?select=role&user_id=${filterValue(user.id)}`),
+  ]);
+  const isAdmin = profiles?.[0]?.role === 'admin'
+    || (additionalRoles || []).some(row => row.role === 'admin');
+  if (!isAdmin) {
     throw new HttpError(403, 'Hanya Admin yang dapat mengelola akun.');
   }
   return user;
@@ -89,6 +94,19 @@ function validateAccount(input) {
     throw new HttpError(400, 'Penugasan kelas hanya tersedia untuk akun guru.');
   }
   return { nama, email, password, role, kelasId, isKepalaSekolah };
+}
+
+const VALID_ROLES = ['admin', 'wali_kelas', 'guru_quran', 'kepala_sekolah', 'orang_tua'];
+function validateAdditionalRoles(input, primaryRole) {
+  const roles = Array.isArray(input) ? input.map(role => String(role).trim()) : [];
+  const unique = [...new Set(roles)];
+  if (unique.some(role => !VALID_ROLES.includes(role))) {
+    throw new HttpError(400, 'Role tambahan tidak tersedia.');
+  }
+  if (unique.includes(primaryRole)) {
+    throw new HttpError(400, 'Role utama tidak boleh menjadi role tambahan.');
+  }
+  return unique;
 }
 
 async function createAccount(input, env) {
@@ -135,21 +153,50 @@ async function createAccount(input, env) {
 }
 
 async function listAccounts(env) {
-  const [userPage, profiles, classes] = await Promise.all([
+  const [userPage, profiles, additionalRoles, classes] = await Promise.all([
     supabaseFetch(env, '/auth/v1/admin/users?page=1&per_page=1000'),
     supabaseFetch(env, '/rest/v1/profiles?select=id,nama,role,is_kepala_sekolah&order=nama.asc'),
+    supabaseFetch(env, '/rest/v1/user_additional_roles?select=user_id,role&order=role.asc'),
     supabaseFetch(env, '/rest/v1/kelas?select=id,nama_kelas,wali_kelas_id&order=nama_kelas.asc'),
   ]);
   const classByTeacher = {};
   (classes || []).forEach(k => { if (k.wali_kelas_id) (classByTeacher[k.wali_kelas_id] ||= []).push(k.nama_kelas); });
   const profileById = Object.fromEntries((profiles || []).map(p => [p.id, p]));
+  const additionalByUser = {};
+  (additionalRoles || []).forEach(row => { (additionalByUser[row.user_id] ||= []).push(row.role); });
   return (userPage?.users || []).map(user => ({
     id: user.id,
     email: user.email || '',
     status: user.banned_until ? 'Diblokir' : 'Aktif',
     ...(profileById[user.id] || { nama: '-', role: 'belum ada profil', is_kepala_sekolah: false }),
+    additional_roles: additionalByUser[user.id] || [],
+    roles: [profileById[user.id]?.role, ...(additionalByUser[user.id] || [])].filter(Boolean),
     wali_kelas: classByTeacher[user.id] || [],
   }));
+}
+
+async function setAdditionalRoles(input, env) {
+  const userId = String(input.user_id || '').trim();
+  if (!userId) throw new HttpError(400, 'User ID tidak valid.');
+  const profiles = await supabaseFetch(env, `/rest/v1/profiles?select=id,role&id=${filterValue(userId)}&limit=1`);
+  if (!profiles?.[0]) throw new HttpError(404, 'Profil akun tidak ditemukan.');
+  const roles = validateAdditionalRoles(input.roles, profiles[0].role);
+  const existing = await supabaseFetch(env, `/rest/v1/user_additional_roles?select=role&user_id=${filterValue(userId)}`);
+  const existingRoles = new Set((existing || []).map(row => row.role));
+  const remove = [...existingRoles].filter(role => !roles.includes(role));
+  const add = roles.filter(role => !existingRoles.has(role));
+  if (remove.length) {
+    await Promise.all(remove.map(role => supabaseFetch(env, `/rest/v1/user_additional_roles?user_id=${filterValue(userId)}&role=${filterValue(role)}`, {
+      method: 'DELETE', headers: { Prefer: 'return=minimal' },
+    })));
+  }
+  if (add.length) {
+    await supabaseFetch(env, '/rest/v1/user_additional_roles', {
+      method: 'POST', headers: { Prefer: 'return=minimal' },
+      body: JSON.stringify(add.map(role => ({ user_id: userId, role }))),
+    });
+  }
+  return { user_id: userId, additional_roles: roles };
 }
 
 async function deleteEmptyClass(classId, env) {
@@ -180,6 +227,7 @@ export async function onRequestPost({ request, env }) {
     const input = await request.json();
     if (input.action === 'list') return json(request, env, 200, { accounts: await listAccounts(env) });
     if (input.action === 'create') return json(request, env, 201, { account: await createAccount(input, env) });
+    if (input.action === 'set_additional_roles') return json(request, env, 200, { account: await setAdditionalRoles(input, env) });
     if (input.action === 'delete_empty_class') return json(request, env, 200, { result: await deleteEmptyClass(input.class_id, env) });
     throw new HttpError(400, 'Action tidak dikenal.');
   } catch (error) {

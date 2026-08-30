@@ -44,8 +44,13 @@ async function requireAdmin(request, env) {
   try {
     user = await supabaseFetch(env, '/auth/v1/user', { headers: { Authorization: `Bearer ${token}`, apikey: env.SUPABASE_ANON_KEY } }, env.SUPABASE_ANON_KEY);
   } catch (_) { throw new HttpError(401, 'Sesi tidak valid atau sudah berakhir.'); }
-  const profiles = await supabaseFetch(env, `/rest/v1/profiles?select=id,role&id=${filterValue(user.id)}&limit=1`);
-  if (!profiles?.[0] || profiles[0].role !== 'admin') throw new HttpError(403, 'Hanya Admin yang dapat mengimpor data orang tua.');
+  const [profiles, additionalRoles] = await Promise.all([
+    supabaseFetch(env, `/rest/v1/profiles?select=id,role&id=${filterValue(user.id)}&limit=1`),
+    supabaseFetch(env, `/rest/v1/user_additional_roles?select=role&user_id=${filterValue(user.id)}`),
+  ]);
+  const isAdmin = profiles?.[0]?.role === 'admin'
+    || (additionalRoles || []).some(row => row.role === 'admin');
+  if (!isAdmin) throw new HttpError(403, 'Hanya Admin yang dapat mengimpor data orang tua.');
 }
 
 function validateRows(rows) {
@@ -55,13 +60,16 @@ function validateRows(rows) {
 }
 
 async function importParents(rows, env) {
-  const [usersResponse, profiles, students, relations] = await Promise.all([
+  const [usersResponse, profiles, additionalRoles, students, relations] = await Promise.all([
     supabaseFetch(env, '/auth/v1/admin/users?page=1&per_page=1000'),
     supabaseFetch(env, '/rest/v1/profiles?select=id,nama,role'),
+    supabaseFetch(env, '/rest/v1/user_additional_roles?select=user_id,role'),
     supabaseFetch(env, '/rest/v1/siswa?select=id,nis,nama'),
     supabaseFetch(env, '/rest/v1/orang_tua_siswa?select=user_id,siswa_id'),
   ]);
   const profileById = Object.fromEntries((profiles || []).map(p => [p.id, p]));
+  const additionalByUser = {};
+  (additionalRoles || []).forEach(row => { (additionalByUser[row.user_id] ||= []).push(row.role); });
   const userByEmail = Object.fromEntries((usersResponse?.users || []).map(u => [String(u.email || '').trim().toLowerCase(), u]));
   const studentByNis = Object.fromEntries((students || []).map(s => [String(s.nis || '').trim().toLowerCase(), s]));
   const existing = new Set((relations || []).map(r => `${r.user_id}:${r.siswa_id}`));
@@ -84,7 +92,9 @@ async function importParents(rows, env) {
     const user = userByEmail[email];
     if (!user) { fail('Akun Auth dengan email tersebut tidak ditemukan. Buat akun orang tua terlebih dahulu.'); continue; }
     const profile = profileById[user.id];
-    if (!profile || profile.role !== 'orang_tua') { fail('Email tidak terdaftar sebagai akun orang_tua.'); continue; }
+    if (!profile || (profile.role !== 'orang_tua' && !(additionalByUser[user.id] || []).includes('orang_tua'))) {
+      fail('Email tidak terdaftar sebagai akun orang_tua.'); continue;
+    }
     const key = `${user.id}:${student.id}`;
     if (existing.has(key) || seen.has(key)) { result.skipped++; continue; }
     try {
